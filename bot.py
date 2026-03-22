@@ -13,9 +13,8 @@ from discord import app_commands
 with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN") or config.get("token")
 BOOSTER_ROLE_NAME = config["booster_role_name"]
-GUILD_ID = config["guild_id"]
 
 # Optional panel image URLs
 TOP_IMAGE_URL = config.get("top_image_url", "")
@@ -46,20 +45,24 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-def get_user_role_id(user_id: int) -> Optional[int]:
+def make_key(guild_id: int, user_id: int) -> str:
+    return f"{guild_id}:{user_id}"
+
+def get_user_role_id(guild_id: int, user_id: int) -> Optional[int]:
     data = load_data()
-    role_id = data.get(str(user_id))
+    role_id = data.get(make_key(guild_id, user_id))
     return int(role_id) if role_id is not None else None
 
-def set_user_role_id(user_id: int, role_id: int):
+def set_user_role_id(guild_id: int, user_id: int, role_id: int):
     data = load_data()
-    data[str(user_id)] = role_id
+    data[make_key(guild_id, user_id)] = role_id
     save_data(data)
 
-def remove_user_role_id(user_id: int):
+def remove_user_role_id(guild_id: int, user_id: int):
     data = load_data()
-    if str(user_id) in data:
-        del data[str(user_id)]
+    key = make_key(guild_id, user_id)
+    if key in data:
+        del data[key]
         save_data(data)
 
 # ----------------------------
@@ -79,7 +82,7 @@ def user_is_booster(member: discord.Member) -> bool:
     return booster_role is not None and booster_role in member.roles
 
 def get_owned_role(guild: discord.Guild, user_id: int) -> Optional[discord.Role]:
-    role_id = get_user_role_id(user_id)
+    role_id = get_user_role_id(guild.id, user_id)
     if role_id is None:
         return None
     return guild.get_role(role_id)
@@ -87,7 +90,7 @@ def get_owned_role(guild: discord.Guild, user_id: int) -> Optional[discord.Role]
 async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
-            "This can only be used inside the server.",
+            "This can only be used inside a server.",
             ephemeral=True
         )
         return False
@@ -188,7 +191,7 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
                 return
 
         await member.add_roles(role, reason="Assigning newly created custom booster role")
-        set_user_role_id(member.id, role.id)
+        set_user_role_id(guild.id, member.id, role.id)
 
         await interaction.response.send_message(
             f"Created your custom role {role.mention}.",
@@ -198,7 +201,8 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
 class EditRoleModal(discord.ui.Modal, title="Edit Custom Role"):
     role_name = discord.ui.TextInput(
         label="New Role Name",
-        placeholder="Leave as current or enter a new name",
+        placeholder="Enter a new role name",
+        required=False,
         max_length=100
     )
     role_color = discord.ui.TextInput(
@@ -254,7 +258,7 @@ class EditRoleModal(discord.ui.Modal, title="Edit Custom Role"):
         )
 
 # ----------------------------
-# Select Views
+# Select Menus
 # ----------------------------
 class AddUserSelect(discord.ui.UserSelect):
     def __init__(self):
@@ -345,7 +349,7 @@ class RemoveUserView(discord.ui.View):
         self.add_item(RemoveUserSelect())
 
 # ----------------------------
-# Persistent Panel View
+# Persistent Button Panel
 # ----------------------------
 class RolePanelView(discord.ui.View):
     def __init__(self):
@@ -427,30 +431,25 @@ class RolePanelView(discord.ui.View):
         )
 
 # ----------------------------
-# Setup hook / ready
+# Ready Event
 # ----------------------------
 @bot.event
 async def on_ready():
-    guild = discord.Object(id=GUILD_ID)
-
     try:
-        synced = await tree.sync(guild=guild)
-        print(f"Synced {len(synced)} command(s) to guild {GUILD_ID}")
+        synced = await tree.sync()
+        print(f"Globally synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
-    # Register persistent view so buttons keep working after restarts
     bot.add_view(RolePanelView())
-
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 # ----------------------------
-# Staff setup command
+# Global Slash Commands
 # ----------------------------
 @tree.command(
     name="setup_customroles_panel",
-    description="Post the custom roles panel",
-    guild=discord.Object(id=GUILD_ID)
+    description="Post the custom roles panel in this server"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup_customroles_panel(interaction: discord.Interaction):
@@ -466,13 +465,9 @@ async def setup_customroles_panel(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# ----------------------------
-# Optional admin-only repost command
-# ----------------------------
 @tree.command(
     name="repost_customroles_panel",
-    description="Repost the custom roles panel",
-    guild=discord.Object(id=GUILD_ID)
+    description="Repost the custom roles panel in this server"
 )
 @app_commands.checks.has_permissions(manage_guild=True)
 async def repost_customroles_panel(interaction: discord.Interaction):
@@ -488,13 +483,9 @@ async def repost_customroles_panel(interaction: discord.Interaction):
         ephemeral=True
     )
 
-# ----------------------------
-# Optional delete-my-role command
-# ----------------------------
 @tree.command(
     name="delete_my_custom_role",
-    description="Delete your custom role",
-    guild=discord.Object(id=GUILD_ID)
+    description="Delete your custom role"
 )
 async def delete_my_custom_role(interaction: discord.Interaction):
     if not await ensure_booster_interaction(interaction):
@@ -513,7 +504,7 @@ async def delete_my_custom_role(interaction: discord.Interaction):
 
     role_name = role.name
     await role.delete(reason=f"Deleted by owner {member}")
-    remove_user_role_id(member.id)
+    remove_user_role_id(guild.id, member.id)
 
     await interaction.response.send_message(
         f"Deleted your custom role **{role_name}**.",
@@ -521,7 +512,7 @@ async def delete_my_custom_role(interaction: discord.Interaction):
     )
 
 # ----------------------------
-# Auto-delete role if user stops boosting
+# Auto-delete if boost is removed
 # ----------------------------
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
@@ -538,10 +529,10 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             except discord.HTTPException as e:
                 print(f"Failed to delete role for {after}: {e}")
             finally:
-                remove_user_role_id(after.id)
+                remove_user_role_id(after.guild.id, after.id)
 
 # ----------------------------
-# App command error handling
+# Error Handling
 # ----------------------------
 @setup_customroles_panel.error
 async def setup_panel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
