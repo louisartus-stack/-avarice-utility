@@ -3,6 +3,7 @@ import os
 import re
 from typing import Optional
 
+import aiohttp
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -14,10 +15,9 @@ with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
 TOKEN = os.getenv("DISCORD_TOKEN") or config.get("token")
-
-# Optional panel image URLs
 TOP_IMAGE_URL = config.get("top_image_url", "")
 BOTTOM_IMAGE_URL = config.get("bottom_image_url", "")
+MAX_MEMBERS_PER_CUSTOM_ROLE = int(config.get("max_members_per_custom_role", 5))
 
 # ----------------------------
 # Intents
@@ -82,6 +82,22 @@ def get_owned_role(guild: discord.Guild, user_id: int) -> Optional[discord.Role]
         return None
     return guild.get_role(role_id)
 
+def guild_supports_role_icons(guild: discord.Guild) -> bool:
+    return "ROLE_ICONS" in guild.features
+
+def count_non_owner_members(role: discord.Role, owner_id: int) -> int:
+    return sum(1 for m in role.members if m.id != owner_id)
+
+async def fetch_image_bytes(url: str) -> bytes:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=20) as response:
+            if response.status != 200:
+                raise ValueError("Could not download image from URL.")
+            content_type = response.headers.get("Content-Type", "").lower()
+            if not any(x in content_type for x in ["image/png", "image/jpeg", "image/jpg"]):
+                raise ValueError("Role icon URL must be a PNG or JPEG image.")
+            return await response.read()
+
 async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
     if not interaction.guild or not isinstance(interaction.user, discord.Member):
         await interaction.response.send_message(
@@ -124,6 +140,7 @@ def build_panel_embeds() -> list[discord.Embed]:
 
 def build_role_info_embed(member: discord.Member, role: discord.Role) -> discord.Embed:
     color_value = role.color.value if role.color.value != 0 else 0x611232
+    member_count = count_non_owner_members(role, member.id)
 
     embed = discord.Embed(
         title="Your Custom Role",
@@ -132,7 +149,16 @@ def build_role_info_embed(member: discord.Member, role: discord.Role) -> discord
     embed.add_field(name="Role Name", value=role.name, inline=False)
     embed.add_field(name="Role Mention", value=role.mention, inline=False)
     embed.add_field(name="Color", value=f"`#{role.color.value:06x}`", inline=False)
-    embed.add_field(name="Members", value=str(len(role.members)), inline=False)
+    embed.add_field(
+        name="Added Members",
+        value=f"{member_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}",
+        inline=False
+    )
+    embed.add_field(
+        name="Role Icon",
+        value="Set" if role.display_icon else "Not set",
+        inline=False
+    )
     embed.set_footer(text=f"Owner: {member.display_name}")
     return embed
 
@@ -252,6 +278,86 @@ class EditRoleModal(discord.ui.Modal, title="Edit Custom Role"):
             ephemeral=True
         )
 
+class RoleIconModal(discord.ui.Modal, title="Set Role Icon"):
+    emoji_icon = discord.ui.TextInput(
+        label="Unicode Emoji Icon",
+        placeholder="Example: 🔥",
+        required=False,
+        max_length=10
+    )
+    image_url = discord.ui.TextInput(
+        label="Image URL (PNG or JPEG)",
+        placeholder="https://example.com/icon.png",
+        required=False,
+        max_length=300
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await ensure_booster_interaction(interaction):
+            return
+
+        guild = interaction.guild
+        member = interaction.user
+        role = get_owned_role(guild, member.id)
+
+        if role is None:
+            await interaction.response.send_message(
+                "You do not have a custom role yet.",
+                ephemeral=True
+            )
+            return
+
+        if not guild_supports_role_icons(guild):
+            await interaction.response.send_message(
+                "This server does not have role icons enabled.",
+                ephemeral=True
+            )
+            return
+
+        emoji_value = str(self.emoji_icon).strip()
+        url_value = str(self.image_url).strip()
+
+        if emoji_value and url_value:
+            await interaction.response.send_message(
+                "Use either a Unicode emoji or an image URL, not both.",
+                ephemeral=True
+            )
+            return
+
+        if not emoji_value and not url_value:
+            await interaction.response.send_message(
+                "You must provide either a Unicode emoji or an image URL.",
+                ephemeral=True
+            )
+            return
+
+        try:
+            if emoji_value:
+                await role.edit(
+                    display_icon=emoji_value,
+                    reason=f"Role icon updated by {member}"
+                )
+            else:
+                image_bytes = await fetch_image_bytes(url_value)
+                await role.edit(
+                    display_icon=image_bytes,
+                    reason=f"Role icon updated by {member}"
+                )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                "Discord rejected that role icon. Try a smaller PNG/JPEG or a simple Unicode emoji.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Updated the icon for {role.mention}.",
+            ephemeral=True
+        )
+
 # ----------------------------
 # Select Menus
 # ----------------------------
@@ -288,9 +394,34 @@ class AddUserSelect(discord.ui.UserSelect):
             )
             return
 
+        if selected_user.id == member.id:
+            await interaction.response.send_message(
+                "You already have your own role.",
+                ephemeral=True
+            )
+            return
+
+        current_added = count_non_owner_members(role, member.id)
+        if current_added >= MAX_MEMBERS_PER_CUSTOM_ROLE:
+            await interaction.response.send_message(
+                f"You have reached your limit of {MAX_MEMBERS_PER_CUSTOM_ROLE} added member(s).",
+                ephemeral=True
+            )
+            return
+
+        if role in selected_user.roles:
+            await interaction.response.send_message(
+                f"{selected_user.mention} already has your role.",
+                ephemeral=True
+            )
+            return
+
         await selected_user.add_roles(role, reason=f"Added to custom role by {member}")
+        new_count = count_non_owner_members(role, member.id)
+
         await interaction.response.send_message(
-            f"Added {selected_user.mention} to {role.mention}.",
+            f"Added {selected_user.mention} to {role.mention}. "
+            f"Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
             ephemeral=True
         )
 
@@ -332,9 +463,19 @@ class RemoveUserSelect(discord.ui.UserSelect):
             )
             return
 
+        if selected_user.id == member.id:
+            await interaction.response.send_message(
+                "You cannot remove yourself from your own custom role here.",
+                ephemeral=True
+            )
+            return
+
         await selected_user.remove_roles(role, reason=f"Removed from custom role by {member}")
+        new_count = count_non_owner_members(role, member.id)
+
         await interaction.response.send_message(
-            f"Removed {selected_user.mention} from {role.mention}.",
+            f"Removed {selected_user.mention} from {role.mention}. "
+            f"Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
             ephemeral=True
         )
 
@@ -398,7 +539,7 @@ class RolePanelView(discord.ui.View):
             return
 
         await interaction.response.send_message(
-            "Select a user to add to your custom role:",
+            f"Select a user to add to your custom role. Limit: {MAX_MEMBERS_PER_CUSTOM_ROLE}.",
             view=AddUserView(),
             ephemeral=True
         )
@@ -424,6 +565,12 @@ class RolePanelView(discord.ui.View):
             view=RemoveUserView(),
             ephemeral=True
         )
+
+    @discord.ui.button(label="Set Icon", style=discord.ButtonStyle.primary, custom_id="set_icon")
+    async def set_icon_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_booster_interaction(interaction):
+            return
+        await interaction.response.send_modal(RoleIconModal())
 
 # ----------------------------
 # Ready Event
