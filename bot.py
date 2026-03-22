@@ -14,7 +14,6 @@ with open("config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
 TOKEN = os.getenv("DISCORD_TOKEN") or config.get("token")
-BOOSTER_ROLE_NAME = config["booster_role_name"]
 
 # Optional panel image URLs
 TOP_IMAGE_URL = config.get("top_image_url", "")
@@ -74,12 +73,8 @@ def parse_hex_color(hex_string: str) -> discord.Color:
         raise ValueError("Invalid hex color.")
     return discord.Color(int(hex_string, 16))
 
-def get_booster_role(guild: discord.Guild) -> Optional[discord.Role]:
-    return discord.utils.get(guild.roles, name=BOOSTER_ROLE_NAME)
-
 def user_is_booster(member: discord.Member) -> bool:
-    booster_role = get_booster_role(member.guild)
-    return booster_role is not None and booster_role in member.roles
+    return member.premium_since is not None
 
 def get_owned_role(guild: discord.Guild, user_id: int) -> Optional[discord.Role]:
     role_id = get_user_role_id(guild.id, user_id)
@@ -97,7 +92,7 @@ async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
 
     if not user_is_booster(interaction.user):
         await interaction.response.send_message(
-            "Only server boosters can use this panel.",
+            "Only active server boosters can use this panel.",
             ephemeral=True
         )
         return False
