@@ -225,6 +225,9 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
                 return
 
         await member.add_roles(role, reason="Assigning newly created custom booster role")
+        # Re-apply role to ensure it becomes highest for user
+        await member.remove_roles(role)
+        await member.add_roles(role)
         set_user_role_id(guild.id, member.id, role.id)
 
         await interaction.response.send_message(
