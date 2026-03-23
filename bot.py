@@ -727,13 +727,6 @@ async def set_my_role_icon_upload(interaction: discord.Interaction, icon_file: d
 
     try:
         image_bytes = await icon_file.read()
-        if len(image_bytes) > 256000:
-            await interaction.response.send_message(
-                "Image is too large. Keep it under 256KB.",
-                ephemeral=True
-        )
-        return
-
         await role.edit(display_icon=image_bytes)
     except discord.HTTPException:
         await interaction.response.send_message(
