@@ -123,8 +123,13 @@ async def move_role_near_top(guild: discord.Guild, role: discord.Role):
         bot_member = guild.me
         if bot_member is None:
             return
-        top_position = max(1, bot_member.top_role.position - 1)
-        await role.edit(position=top_position, reason="Move custom booster role near top")
+
+        # Highest possible position (just under bot)
+        target_position = bot_member.top_role.position - 1
+
+        # Move role there
+        await role.edit(position=target_position, reason="Move custom role to top")
+
     except Exception as e:
         print(f"Failed to move role position: {e}")
 
