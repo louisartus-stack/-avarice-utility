@@ -19,6 +19,9 @@ TOP_IMAGE_URL = config.get("top_image_url", "")
 BOTTOM_IMAGE_URL = config.get("bottom_image_url", "")
 MAX_MEMBERS_PER_CUSTOM_ROLE = int(config.get("max_members_per_custom_role", 5))
 
+if not TOKEN:
+    raise ValueError("Missing bot token. Set DISCORD_TOKEN in Railway or token in config.json for local testing.")
+
 # ----------------------------
 # Intents
 # ----------------------------
@@ -94,8 +97,8 @@ async def fetch_image_bytes(url: str) -> bytes:
             if response.status != 200:
                 raise ValueError("Could not download image from URL.")
             content_type = response.headers.get("Content-Type", "").lower()
-            if not any(x in content_type for x in ["image/png", "image/jpeg", "image/jpg"]):
-                raise ValueError("Role icon URL must be a PNG or JPEG image.")
+            if not any(x in content_type for x in ["image/png", "image/jpeg", "image/jpg", "image/webp"]):
+                raise ValueError("Role icon URL must be a PNG, JPEG, or WEBP image.")
             return await response.read()
 
 async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
@@ -115,6 +118,16 @@ async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
 
     return True
 
+async def move_role_near_top(guild: discord.Guild, role: discord.Role):
+    try:
+        bot_member = guild.me
+        if bot_member is None:
+            return
+        top_position = max(1, bot_member.top_role.position - 1)
+        await role.edit(position=top_position, reason="Move custom booster role near top")
+    except Exception as e:
+        print(f"Failed to move role position: {e}")
+
 def build_panel_embeds() -> list[discord.Embed]:
     embeds = []
 
@@ -127,6 +140,7 @@ def build_panel_embeds() -> list[discord.Embed]:
         title="Manage a Custom Role",
         description=(
             "Want to create your own custom role on the server?\n\n"
+            f"You may add up to **{MAX_MEMBERS_PER_CUSTOM_ROLE}** user(s) to your role.\n\n"
             "Use the buttons below to interact with the system."
         ),
         color=0x611232
@@ -149,16 +163,8 @@ def build_role_info_embed(member: discord.Member, role: discord.Role) -> discord
     embed.add_field(name="Role Name", value=role.name, inline=False)
     embed.add_field(name="Role Mention", value=role.mention, inline=False)
     embed.add_field(name="Color", value=f"`#{role.color.value:06x}`", inline=False)
-    embed.add_field(
-        name="Added Members",
-        value=f"{member_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}",
-        inline=False
-    )
-    embed.add_field(
-        name="Role Icon",
-        value="Set" if role.display_icon else "Not set",
-        inline=False
-    )
+    embed.add_field(name="Added Members", value=f"{member_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}", inline=False)
+    embed.add_field(name="Role Icon", value="Set" if role.display_icon else "Not set", inline=False)
     embed.set_footer(text=f"Owner: {member.display_name}")
     return embed
 
@@ -194,9 +200,11 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
             return
 
         role = await guild.create_role(
-            name=str(self.role_name),
+            name=str(self.role_name).strip(),
             reason=f"Custom booster role created for {member}"
         )
+
+        await move_role_near_top(guild, role)
 
         color_text = str(self.role_color).strip()
         if color_text:
@@ -273,6 +281,8 @@ class EditRoleModal(discord.ui.Modal, title="Edit Custom Role"):
             return
 
         await role.edit(reason=f"Custom role edited by {member}", **kwargs)
+        await move_role_near_top(guild, role)
+
         await interaction.response.send_message(
             f"Updated your custom role {role.mention}.",
             ephemeral=True
@@ -286,7 +296,7 @@ class RoleIconModal(discord.ui.Modal, title="Set Role Icon"):
         max_length=10
     )
     image_url = discord.ui.TextInput(
-        label="Image URL (PNG or JPEG)",
+        label="Image URL (PNG/JPEG/WEBP)",
         placeholder="https://example.com/icon.png",
         required=False,
         max_length=300
@@ -333,22 +343,16 @@ class RoleIconModal(discord.ui.Modal, title="Set Role Icon"):
 
         try:
             if emoji_value:
-                await role.edit(
-                    display_icon=emoji_value,
-                    reason=f"Role icon updated by {member}"
-                )
+                await role.edit(display_icon=emoji_value, reason=f"Role icon updated by {member}")
             else:
                 image_bytes = await fetch_image_bytes(url_value)
-                await role.edit(
-                    display_icon=image_bytes,
-                    reason=f"Role icon updated by {member}"
-                )
+                await role.edit(display_icon=image_bytes, reason=f"Role icon updated by {member}")
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
         except discord.HTTPException:
             await interaction.response.send_message(
-                "Discord rejected that role icon. Try a smaller PNG/JPEG or a simple Unicode emoji.",
+                "Discord rejected that role icon. Try a smaller PNG/JPEG/WEBP or a simple Unicode emoji.",
                 ephemeral=True
             )
             return
@@ -420,8 +424,7 @@ class AddUserSelect(discord.ui.UserSelect):
         new_count = count_non_owner_members(role, member.id)
 
         await interaction.response.send_message(
-            f"Added {selected_user.mention} to {role.mention}. "
-            f"Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
+            f"Added {selected_user.mention} to {role.mention}. Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
             ephemeral=True
         )
 
@@ -465,7 +468,7 @@ class RemoveUserSelect(discord.ui.UserSelect):
 
         if selected_user.id == member.id:
             await interaction.response.send_message(
-                "You cannot remove yourself from your own custom role here.",
+                "Use the **Remove Me** button if you want to remove your role from yourself.",
                 ephemeral=True
             )
             return
@@ -474,8 +477,7 @@ class RemoveUserSelect(discord.ui.UserSelect):
         new_count = count_non_owner_members(role, member.id)
 
         await interaction.response.send_message(
-            f"Removed {selected_user.mention} from {role.mention}. "
-            f"Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
+            f"Removed {selected_user.mention} from {role.mention}. Usage: {new_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}.",
             ephemeral=True
         )
 
@@ -491,19 +493,19 @@ class RolePanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Create Role", style=discord.ButtonStyle.primary, custom_id="y1")
+    @discord.ui.button(label="Create Role", style=discord.ButtonStyle.primary, custom_id="y1", row=0)
     async def create_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
         await interaction.response.send_modal(CreateRoleModal())
 
-    @discord.ui.button(label="Edit Role", style=discord.ButtonStyle.secondary, custom_id="y2")
+    @discord.ui.button(label="Edit Role", style=discord.ButtonStyle.secondary, custom_id="y2", row=0)
     async def edit_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
         await interaction.response.send_modal(EditRoleModal())
 
-    @discord.ui.button(label="View Role", style=discord.ButtonStyle.secondary, custom_id="y3")
+    @discord.ui.button(label="View Role", style=discord.ButtonStyle.secondary, custom_id="y3", row=0)
     async def view_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
@@ -522,7 +524,7 @@ class RolePanelView(discord.ui.View):
         embed = build_role_info_embed(member, role)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Add User", style=discord.ButtonStyle.success, custom_id="g1")
+    @discord.ui.button(label="Add User", style=discord.ButtonStyle.success, custom_id="g1", row=0)
     async def add_user_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
@@ -544,7 +546,7 @@ class RolePanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Remove User", style=discord.ButtonStyle.danger, custom_id="b3")
+    @discord.ui.button(label="Remove User", style=discord.ButtonStyle.danger, custom_id="b3", row=1)
     async def remove_user_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
@@ -566,11 +568,65 @@ class RolePanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Set Icon", style=discord.ButtonStyle.primary, custom_id="set_icon")
+    @discord.ui.button(label="Set Icon", style=discord.ButtonStyle.primary, custom_id="set_icon", row=1)
     async def set_icon_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await ensure_booster_interaction(interaction):
             return
         await interaction.response.send_modal(RoleIconModal())
+
+    @discord.ui.button(label="Remove Me", style=discord.ButtonStyle.secondary, custom_id="remove_me", row=1)
+    async def remove_me_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_booster_interaction(interaction):
+            return
+
+        guild = interaction.guild
+        member = interaction.user
+        role = get_owned_role(guild, member.id)
+
+        if role is None:
+            await interaction.response.send_message(
+                "You do not have a custom role yet.",
+                ephemeral=True
+            )
+            return
+
+        if role not in member.roles:
+            await interaction.response.send_message(
+                "You do not currently have your custom role assigned to yourself.",
+                ephemeral=True
+            )
+            return
+
+        await member.remove_roles(role, reason=f"Owner removed own custom role assignment: {member}")
+        await interaction.response.send_message(
+            f"Removed {role.mention} from yourself. Your role still exists.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Delete Role", style=discord.ButtonStyle.danger, custom_id="delete_role", row=1)
+    async def delete_role_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await ensure_booster_interaction(interaction):
+            return
+
+        guild = interaction.guild
+        member = interaction.user
+        role = get_owned_role(guild, member.id)
+
+        if role is None:
+            await interaction.response.send_message(
+                "You do not have a custom role to delete.",
+                ephemeral=True
+            )
+            return
+
+        role_name = role.name
+        await role.delete(reason=f"Deleted by owner {member}")
+        remove_user_role_id(guild.id, member.id)
+
+        await interaction.response.send_message(
+            f"Deleted your custom role **{role_name}**.",
+            ephemeral=True
+        )
 
 # ----------------------------
 # Ready Event
@@ -589,46 +645,25 @@ async def on_ready():
 # ----------------------------
 # Global Slash Commands
 # ----------------------------
-@tree.command(
-    name="setup_customroles_panel",
-    description="Post the custom roles panel in this server"
-)
+@tree.command(name="setup_customroles_panel", description="Post the custom roles panel in this server")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup_customroles_panel(interaction: discord.Interaction):
-    embeds = build_panel_embeds()
-
     await interaction.channel.send(
-        embeds=embeds,
+        embeds=build_panel_embeds(),
         view=RolePanelView()
     )
+    await interaction.response.send_message("Custom roles panel posted.", ephemeral=True)
 
-    await interaction.response.send_message(
-        "Custom roles panel posted.",
-        ephemeral=True
-    )
-
-@tree.command(
-    name="repost_customroles_panel",
-    description="Repost the custom roles panel in this server"
-)
+@tree.command(name="repost_customroles_panel", description="Repost the custom roles panel in this server")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def repost_customroles_panel(interaction: discord.Interaction):
-    embeds = build_panel_embeds()
-
     await interaction.channel.send(
-        embeds=embeds,
+        embeds=build_panel_embeds(),
         view=RolePanelView()
     )
+    await interaction.response.send_message("Custom roles panel reposted.", ephemeral=True)
 
-    await interaction.response.send_message(
-        "Custom roles panel reposted.",
-        ephemeral=True
-    )
-
-@tree.command(
-    name="delete_my_custom_role",
-    description="Delete your custom role"
-)
+@tree.command(name="delete_my_custom_role", description="Delete your custom role")
 async def delete_my_custom_role(interaction: discord.Interaction):
     if not await ensure_booster_interaction(interaction):
         return
@@ -638,10 +673,7 @@ async def delete_my_custom_role(interaction: discord.Interaction):
     role = get_owned_role(guild, member.id)
 
     if role is None:
-        await interaction.response.send_message(
-            "You do not have a custom role to delete.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("You do not have a custom role to delete.", ephemeral=True)
         return
 
     role_name = role.name
@@ -650,6 +682,53 @@ async def delete_my_custom_role(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"Deleted your custom role **{role_name}**.",
+        ephemeral=True
+    )
+
+@tree.command(name="set_my_role_icon_upload", description="Upload an image file to use as your role icon")
+@app_commands.describe(icon_file="PNG, JPEG, or WEBP image file")
+async def set_my_role_icon_upload(interaction: discord.Interaction, icon_file: discord.Attachment):
+    if not await ensure_booster_interaction(interaction):
+        return
+
+    guild = interaction.guild
+    member = interaction.user
+    role = get_owned_role(guild, member.id)
+
+    if role is None:
+        await interaction.response.send_message(
+            "You do not have a custom role yet.",
+            ephemeral=True
+        )
+        return
+
+    if not guild_supports_role_icons(guild):
+        await interaction.response.send_message(
+            "This server does not have role icons enabled.",
+            ephemeral=True
+        )
+        return
+
+    content_type = (icon_file.content_type or "").lower()
+    if not any(x in content_type for x in ["image/png", "image/jpeg", "image/jpg", "image/webp"]):
+        await interaction.response.send_message(
+            "Upload a PNG, JPEG, or WEBP image.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        image_bytes = await icon_file.read()
+        await role.edit(display_icon=image_bytes, reason=f"Role icon uploaded by {member}")
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Discord rejected that uploaded image. Try a smaller PNG/JPEG/WEBP file.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Uploaded a new icon for {role.mention}.",
         ephemeral=True
     )
 
