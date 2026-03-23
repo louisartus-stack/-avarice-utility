@@ -119,17 +119,17 @@ async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
     return True
 
 async def move_role_near_top(guild: discord.Guild, role: discord.Role):
+    """
+    Move the custom role to the highest position the bot can manage.
+    This helps make the custom role's color become the member's visible name color.
+    """
     try:
         bot_member = guild.me
         if bot_member is None:
             return
 
-        # Highest possible position (just under bot)
-        target_position = bot_member.top_role.position - 1
-
-        # Move role there
-        await role.edit(position=target_position, reason="Move custom role to top")
-
+        target_position = max(1, bot_member.top_role.position - 1)
+        await role.edit(position=target_position, reason="Move custom booster role near top")
     except Exception as e:
         print(f"Failed to move role position: {e}")
 
@@ -209,6 +209,7 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
             reason=f"Custom booster role created for {member}"
         )
 
+        # Move as high as possible so its color becomes the visible primary name color
         await move_role_near_top(guild, role)
 
         color_text = str(self.role_color).strip()
@@ -225,9 +226,6 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
                 return
 
         await member.add_roles(role, reason="Assigning newly created custom booster role")
-        # Re-apply role to ensure it becomes highest for user
-        await member.remove_roles(role)
-        await member.add_roles(role)
         set_user_role_id(guild.id, member.id, role.id)
 
         await interaction.response.send_message(
@@ -727,7 +725,7 @@ async def set_my_role_icon_upload(interaction: discord.Interaction, icon_file: d
 
     try:
         image_bytes = await icon_file.read()
-        await role.edit(display_icon=image_bytes)
+        await role.edit(display_icon=image_bytes, reason=f"Role icon uploaded by {member}")
     except discord.HTTPException:
         await interaction.response.send_message(
             "Discord rejected that uploaded image. Try a smaller PNG/JPEG/WEBP file.",
