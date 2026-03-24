@@ -737,7 +737,7 @@ async def seticon(interaction: discord.Interaction, icon_file: discord.Attachmen
         f"Updated icon for {role.mention}.",
         ephemeral=True
     )
-        return
+    return
 
     try:
         image_bytes = await icon_file.read()
