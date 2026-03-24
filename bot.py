@@ -691,9 +691,9 @@ async def delete_my_custom_role(interaction: discord.Interaction):
         ephemeral=True
     )
 
-@tree.command(name="set_my_role_icon_upload", description="Upload an image file to use as your role icon")
+@tree.command(name="seticon", description="Upload an image file to use as your role icon")
 @app_commands.describe(icon_file="PNG, JPEG, or WEBP image file")
-async def set_my_role_icon_upload(interaction: discord.Interaction, icon_file: discord.Attachment):
+async def seticon(interaction: discord.Interaction, icon_file: discord.Attachment):
     if not await ensure_booster_interaction(interaction):
         return
 
@@ -721,6 +721,22 @@ async def set_my_role_icon_upload(interaction: discord.Interaction, icon_file: d
             "Upload a PNG, JPEG, or WEBP image.",
             ephemeral=True
         )
+        return
+
+    try:
+        image_bytes = await icon_file.read()
+        await role.edit(display_icon=image_bytes, reason=f"Role icon uploaded by {member}")
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Discord rejected that uploaded image. Try a smaller file.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Updated icon for {role.mention}.",
+        ephemeral=True
+    )
         return
 
     try:
