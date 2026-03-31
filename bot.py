@@ -121,17 +121,44 @@ async def ensure_booster_interaction(interaction: discord.Interaction) -> bool:
 async def move_role_near_top(guild: discord.Guild, role: discord.Role):
     """
     Move the custom role to the highest position the bot can manage.
-    This helps make the custom role's color become the member's visible name color.
+    Uses bulk role position editing for better reliability.
     """
     try:
         bot_member = guild.me
         if bot_member is None:
             return
 
-        target_position = max(1, bot_member.top_role.position - 1)
-        await role.edit(position=target_position, reason="Move custom booster role near top")
-    except Exception as e:
+        bot_top = bot_member.top_role
+        if bot_top is None:
+            return
+
+        # Highest position the bot can place another role
+        target_position = bot_top.position - 1
+        if target_position < 1:
+            return
+
+        # If already in the right place, stop
+        if role.position == target_position:
+            return
+
+        await guild.edit_role_positions(
+            positions={
+                role: target_position
+            },
+            reason="Move custom booster role near top"
+        )
+
+        # Refetch once to confirm
+        refreshed = guild.get_role(role.id)
+        if refreshed:
+            print(f"Moved role '{refreshed.name}' to position {refreshed.position}")
+
+    except discord.Forbidden:
+        print("Failed to move role position: bot lacks permission or hierarchy is too low.")
+    except discord.HTTPException as e:
         print(f"Failed to move role position: {e}")
+    except Exception as e:
+        print(f"Unexpected error moving role position: {e}")
 
 def build_panel_embeds() -> list[discord.Embed]:
     embeds = []
@@ -170,6 +197,7 @@ def build_role_info_embed(member: discord.Member, role: discord.Role) -> discord
     embed.add_field(name="Color", value=f"`#{role.color.value:06x}`", inline=False)
     embed.add_field(name="Added Members", value=f"{member_count}/{MAX_MEMBERS_PER_CUSTOM_ROLE}", inline=False)
     embed.add_field(name="Role Icon", value="Set" if role.display_icon else "Not set", inline=False)
+    embed.add_field(name="Role Position", value=str(role.position), inline=False)
     embed.set_footer(text=f"Owner: {member.display_name}")
     return embed
 
@@ -209,9 +237,6 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
             reason=f"Custom booster role created for {member}"
         )
 
-        # Move as high as possible so its color becomes the visible primary name color
-        await move_role_near_top(guild, role)
-
         color_text = str(self.role_color).strip()
         if color_text:
             try:
@@ -225,7 +250,10 @@ class CreateRoleModal(discord.ui.Modal, title="Create Custom Role"):
                 )
                 return
 
+        await move_role_near_top(guild, role)
         await member.add_roles(role, reason="Assigning newly created custom booster role")
+        await move_role_near_top(guild, role)
+
         set_user_role_id(guild.id, member.id, role.id)
 
         await interaction.response.send_message(
@@ -363,6 +391,8 @@ class RoleIconModal(discord.ui.Modal, title="Set Role Icon"):
             )
             return
 
+        await move_role_near_top(guild, role)
+
         await interaction.response.send_message(
             f"Updated the icon for {role.mention}.",
             ephemeral=True
@@ -427,6 +457,8 @@ class AddUserSelect(discord.ui.UserSelect):
             return
 
         await selected_user.add_roles(role, reason=f"Added to custom role by {member}")
+        await move_role_near_top(guild, role)
+
         new_count = count_non_owner_members(role, member.id)
 
         await interaction.response.send_message(
@@ -480,6 +512,8 @@ class RemoveUserSelect(discord.ui.UserSelect):
             return
 
         await selected_user.remove_roles(role, reason=f"Removed from custom role by {member}")
+        await move_role_near_top(guild, role)
+
         new_count = count_non_owner_members(role, member.id)
 
         await interaction.response.send_message(
@@ -604,6 +638,8 @@ class RolePanelView(discord.ui.View):
             return
 
         await member.remove_roles(role, reason=f"Owner removed own custom role assignment: {member}")
+        await move_role_near_top(guild, role)
+
         await interaction.response.send_message(
             f"Removed {role.mention} from yourself. Your role still exists.",
             ephemeral=True
@@ -726,22 +762,7 @@ async def seticon(interaction: discord.Interaction, icon_file: discord.Attachmen
     try:
         image_bytes = await icon_file.read()
         await role.edit(display_icon=image_bytes, reason=f"Role icon uploaded by {member}")
-    except discord.HTTPException:
-        await interaction.response.send_message(
-            "Discord rejected that uploaded image. Try a smaller file.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message(
-        f"Updated icon for {role.mention}.",
-        ephemeral=True
-    )
-    return
-
-    try:
-        image_bytes = await icon_file.read()
-        await role.edit(display_icon=image_bytes, reason=f"Role icon uploaded by {member}")
+        await move_role_near_top(guild, role)
     except discord.HTTPException:
         await interaction.response.send_message(
             "Discord rejected that uploaded image. Try a smaller PNG/JPEG/WEBP file.",
